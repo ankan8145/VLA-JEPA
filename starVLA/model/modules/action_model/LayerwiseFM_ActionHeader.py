@@ -170,10 +170,16 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
     max_seq_len: int = field(default=1024, metadata={"help": "Maxium Sequence Length"})
     action_dim: int = field(default=None, metadata={"help": "Action dimension."})
     action_horizon: int = field(default=None, metadata={"help": "Action horizon."})
-    noise_beta_alpha: float = field(default=1.5, metadata={"help": ""})
-    noise_beta_beta: float = field(default=1.0, metadata={"help": ""})
+    noise_beta_alpha: float = field(
+        default=1.5,
+        metadata={"help": "Alpha parameter of the Beta distribution used for timestep sampling (Beta+flip). Default 1.5 skews mass toward t=1."},
+    )
+    noise_beta_beta: float = field(
+        default=1.0,
+        metadata={"help": "Beta parameter of the Beta distribution used for timestep sampling (Beta+flip)."},
+    )
     noise_s: float = field(
-        default=0.999, metadata={"help": "Flow matching noise Beta distribution s."}
+        default=0.999, metadata={"help": "Flip scale s for Beta+flip timestep sampling: t = (s - raw) / s, clipped to [0,1]."}
     )
     num_timestep_buckets: int = field(
         default=1000, metadata={"help": "Number of timestep discretization buckets."}
@@ -257,6 +263,33 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
         self.config = config
 
     def sample_time(self, batch_size, device, dtype):
+        """Sample flow-matching timesteps using a **Beta+flip** distribution.
+
+        The procedure mirrors the GR00T N1.5 approach:
+
+        1. Draw ``raw`` ~ Beta(noise_beta_alpha, noise_beta_beta).
+           With the default parameters Beta(1.5, 1.0) the mass is skewed toward
+           larger values (i.e. toward clean data at t = 1).
+        2. **Flip**: ``t = (s - raw) / s``  where ``s = noise_s`` (default 0.999).
+           This inverts the skew so that more training samples are drawn near
+           t = 0 (heavily noised), which is empirically beneficial for flow
+           matching.
+        3. Since ``raw`` ∈ [0, 1] and ``s`` = 0.999, the output ``t`` lies in
+           the range [-0.001, 1.0].  Values slightly below zero only arise when
+           ``raw > s`` (a rare tail event for Beta(1.5, 1.0)) and are handled
+           by downstream clamping if needed.
+
+        This is distinct from Uniform[0,1] timestep sampling: the Beta+flip
+        distribution intentionally concentrates samples near t = 0.
+
+        Args:
+            batch_size: Number of timestep samples to draw.
+            device: Target device for the returned tensor.
+            dtype: Target dtype for the returned tensor.
+
+        Returns:
+            Tensor of shape (batch_size,) with values in [0, 1].
+        """
         sample = self.beta_dist.sample([batch_size]).to(device, dtype=dtype)
         return (self.config.noise_s - sample) / self.config.noise_s
 
